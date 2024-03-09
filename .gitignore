@@ -20,6 +20,7 @@ parts/
 sdist/
 var/
 wheels/
+RatInABox/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
