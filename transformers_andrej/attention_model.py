@@ -17,11 +17,12 @@ def load_data(split):
     
     return feature_array[:n] if split == 'train' else feature_array[n:]
 
-def get_batch(context_len, batch_size, split, ):
+def get_batch(context_len, batch_size, split, device):
     data = load_data(split=split)
-    ix = torch.randint(len(data) - context_len, (batch_size,))
+    ix = torch.randint(len(data) - context_len -1, (batch_size,))
     x = torch.stack([data[i:i+context_len] for i in ix])
     y = torch.stack([data[i+context_len+1] for i in ix])
+    x, y = x.to(device), y.to(device)
     return x, y
 
 
