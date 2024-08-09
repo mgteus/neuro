@@ -17,7 +17,7 @@ def load_data(split):
     
     return feature_array[:n] if split == 'train' else feature_array[n:]
 
-def get_batch(context_len, batch_size, split, device):
+def get_batch1d(context_len, batch_size, split, device):
     data = load_data(split=split)
     ix = torch.randint(len(data) - context_len -1, (batch_size,))
     x = torch.stack([data[i:i+context_len] for i in ix])
@@ -25,6 +25,14 @@ def get_batch(context_len, batch_size, split, device):
     x, y = x.to(device), y.to(device)
     return x, y
 
+
+def get_batch2d(context_len, batch_size, split, device):
+    data = load_data(split=split)
+    ix = torch.randint(len(data) - context_len -1, (batch_size,))
+    x = torch.stack([data[i:i+context_len] for i in ix])
+    y = torch.stack([data[i+1:i+context_len+1] for i in ix])
+    x, y = x.to(device), y.to(device)
+    return x, y
 
 def RMSELoss(pred, true):
     criterion = nn.MSELoss()
@@ -45,28 +53,28 @@ class Head(nn.Module):
         self.enc_layer = nn.Linear(2, 1)
         self.output_layer = nn.Linear(self.context_len, 2)
         #   # dynamic layers
-        self.key = nn.Linear(self.context_len, self.context_len)
-        self.query = nn.Linear(self.context_len, self.context_len)
-        self.values = nn.Linear(self.context_len, self.context_len)
+        self.key = nn.Linear(2, self.context_len)
+        self.query = nn.Linear(2, self.context_len)
+        self.values = nn.Linear(2, self.context_len)
 
         # tril
-        self.register_buffer('tril', torch.tril(torch.ones(self.batch_size, self.batch_size)))
+        self.register_buffer('tril', torch.tril(torch.ones(self.context_len, self.context_len)))
 
         # dropout
         self.dropout = nn.Dropout(self.dropout_value)
 
 
     def forward(self, x):
-        x = self.pos_to_enc_layer(x) # [x, y] -> [i, j]
-        x = self.enc_layer(x).squeeze(-1)        # [i, j] -> [k]
+        # x = self.pos_to_enc_layer(x) # [x, y] -> [i, j]
+        # x = self.enc_layer(x).squeeze(-1)        # [i, j] -> [k]
 
-        B, C = x.shape
+        #B, C = x.shape
 
         k = self.key(x)
         q = self.query(x)
 
         wei = q @ k.transpose(-2, -1)  # [B, C] @ [C, B] -> [B, B]
-        #wei = wei.masked_fill(self.tril[:C, :C] == 0, float('-inf'))
+        wei = wei.masked_fill(self.tril == 0, float('-inf'))
         wei = nn.functional.softmax(wei, dim=-1)
 
         v = self.values(x)
@@ -79,12 +87,12 @@ class Head(nn.Module):
 
 
 if __name__ == '__main__':
-
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     CONTEXT_LEN = 10
     BATCH_SIZE = 4
     DROPOUT = 0.1
     LEARNING_RATE = 1e-3
-    NUM_EPOCHS = 10
+    NUM_EPOCHS = 1
 
     model = Head(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, dropout=DROPOUT)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -94,7 +102,7 @@ if __name__ == '__main__':
     loss_list = []
 
     for epoch in range(NUM_EPOCHS):
-        xb, yb = get_batch(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train')
+        xb, yb = get_batch2d(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train', device=DEVICE)
         optimizer.zero_grad(set_to_none=True)
         predictions = model(xb)
         loss = RMSELoss(predictions, yb)
