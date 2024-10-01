@@ -68,13 +68,13 @@ class Head(nn.Module):
         # x = self.pos_to_enc_layer(x) # [x, y] -> [i, j]
         # x = self.enc_layer(x).squeeze(-1)        # [i, j] -> [k]
 
-        #B, C = x.shape
+        B, C, _ = x.shape
 
         k = self.key(x)
         q = self.query(x)
 
         wei = q @ k.transpose(-2, -1)  # [B, C] @ [C, B] -> [B, B]
-        wei = wei.masked_fill(self.tril == 0, float('-inf'))
+        wei = wei.masked_fill(self.tril[:C, :C] == 0, float('-inf'))
         wei = nn.functional.softmax(wei, dim=-1)
 
         v = self.values(x)
@@ -88,8 +88,8 @@ class Head(nn.Module):
 
 if __name__ == '__main__':
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    CONTEXT_LEN = 10
-    BATCH_SIZE = 4
+    CONTEXT_LEN = 30
+    BATCH_SIZE = 16
     DROPOUT = 0.1
     LEARNING_RATE = 1e-3
     NUM_EPOCHS = 1
@@ -111,8 +111,8 @@ if __name__ == '__main__':
         optimizer.step()
         print(f"iter. {epoch} - loss = {loss.item():4f}")
 
-    plt.plot(loss_list)
-    plt.show()
+    # plt.plot(loss_list)
+    # plt.show()
 
 
 
