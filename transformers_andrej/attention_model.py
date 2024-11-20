@@ -38,20 +38,47 @@ def RMSELoss(pred, true):
     criterion = nn.MSELoss()
     return torch.sqrt(criterion(pred, true))
 
+class PositionEncoding(nn.Module):
+    
+    def __init__(self, d_model=2, max_len=6):
+        
+        super().__init__()
+        
+        pe = torch.zeros(max_len, d_model)
+        
+        position = torch.arange(start=0, end=max_len, step=1).float().unsqueeze(1)
+        embedding_index = torch.arange(start=0, end=d_model, step=2).float()
+        
+        div_term = 1/torch.tensor(10000.0)**(embedding_index / d_model)
+        
+
+        pe[:, 0::2] = torch.sin(position * div_term) 
+        pe[:, 1::2] = torch.cos(position * div_term) 
+        
+        self.register_buffer('pe', pe) 
+
+        
+    def forward(self, word_embeddings):
+        
+        return word_embeddings + self.pe[:word_embeddings.size(0), :] 
+    def return_positions(self, embeded_positions):
+        return embeded_positions - self.pe[:embeded_positions.size(0), :]
 
 
 class Head(nn.Module):
-    def __init__(self, context_len, batch_size, dropout) -> None:
+    def __init__(self, context_len, batch_size, dropout, output_dim) -> None:
         super().__init__()
         # parameters
         self.batch_size = batch_size
         self.context_len = context_len
         self.dropout_value = dropout
+        self.output_dim = output_dim
+
         # layers
         #   # static layers
         self.pos_to_enc_layer = nn.Linear(2, 2,)
         self.enc_layer = nn.Linear(2, 1)
-        self.output_layer = nn.Linear(self.context_len, 2)
+        self.output_layer = nn.Linear(self.context_len, self.output_dim)
         #   # dynamic layers
         self.key = nn.Linear(2, self.context_len)
         self.query = nn.Linear(2, self.context_len)
@@ -87,28 +114,33 @@ class Head(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     
-    def __init__(self, num_heads, context_len, batch_size, dropout):
+    def __init__(self, num_heads, context_len, batch_size, dropout, head_output_dim):
         super().__init__()
         self.context_len = context_len
         self.batch_size = batch_size
         self.dropout = dropout
         self.num_heads = num_heads
+        self.head_output_dim = head_output_dim
+        # positional embedding
+        self.pose = PositionEncoding(d_model=2, max_len=context_len)
         
-        self.linear_x = nn.Linear(3, 1, bias=False)
-        self.linear_y = nn.Linear(3, 1, bias=False)
-        self.linear_both = nn.Linear(6, 2, bias=False)
+        # self.linear_x = nn.Linear(3, 1, bias=False)
+        # self.linear_y = nn.Linear(3, 1, bias=False)
+        self.linear_both = nn.Linear(self.num_heads*self.head_output_dim, 2, bias=False)
 
         # creating the multi heads
         self.heads = nn.ModuleList(
             [ Head(context_len=self.context_len
                     , batch_size=self.batch_size
-                    , dropout=self.dropout)
+                    , dropout=self.dropout
+                    , output_dim=self.head_output_dim)
                 for _ in range(num_heads)
                     ]
                     )
     def forward(self, x):
+        embed_positions = self.pose(x)
         concat_table = torch.cat(
-                [h(x) for h in self.heads]
+                [h(embed_positions) for h in self.heads]
                 , dim=-1
                 )
         output = self.linear_both(concat_table)
