@@ -3,10 +3,11 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 
 def load_data(split):
-    df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_run.gzip')
+    df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15.gzip')
     feature_array = []
     for x_pos,y_pos in zip(df['x_pos'], df['y_pos']):
             feature_array.append(np.array([x_pos, y_pos], dtype='double'))
@@ -59,8 +60,8 @@ class PositionEncoding(nn.Module):
 
         
     def forward(self, word_embeddings):
-        
         return word_embeddings + self.pe[:word_embeddings.size(0), :] 
+    
     def return_positions(self, embeded_positions):
         return embeded_positions - self.pe[:embeded_positions.size(0), :]
 
@@ -160,13 +161,13 @@ class MultiHeadAttention(nn.Module):
 
 
 if __name__ == '__main__':
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    CONTEXT_LEN = 30
-    BATCH_SIZE = 16
+    CONTEXT_LEN = 64
+    BATCH_SIZE = 512
     DROPOUT = 0.1
     LEARNING_RATE = 1e-4
-    NUM_EPOCHS = 1000
-    NUM_HEADS = 3
+    NUM_HEADS = 2
+    NUM_EPOCHS = 1e3
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
     # model = Head(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, dropout=DROPOUT)
@@ -174,7 +175,8 @@ if __name__ == '__main__':
                   num_heads = NUM_HEADS
                 , context_len = CONTEXT_LEN
                 , batch_size = BATCH_SIZE
-                , dropout = DROPOUT)
+                , dropout = DROPOUT
+                , head_output_dim=2)
     model = model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
@@ -183,18 +185,19 @@ if __name__ == '__main__':
  
     loss_list = []
 
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(int(NUM_EPOCHS)):
         xb, yb = get_batch2d(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train', device=DEVICE)
         optimizer.zero_grad(set_to_none=True)
         predictions = model(xb)
         predictions = predictions.to(DEVICE)
-        print(predictions.shape)
+        # print(predictions.shape)
         loss = RMSELoss(predictions, yb)
-        print(loss)
+        # print(loss)
         loss.backward()
         optimizer.step()
         loss_list.append(loss.cpu().detach().numpy())
-        print(f"iter. {epoch} - loss = {loss.item():4f}")
+        if epoch%100==0:
+            print(f"iter. {epoch} - loss = {loss.item():4f}", datetime.now())
 
     plt.plot(loss_list)
     plt.show()
