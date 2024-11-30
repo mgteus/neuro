@@ -97,7 +97,7 @@ def get_batch2d(context_len, batch_size, split, device):
     return x, y
 
 def RMSELoss(pred, true):
-    criterion = nn.MSELoss(reduction='sum')
+    criterion = nn.MSELoss()
     return torch.sqrt(criterion(pred, true))
 
 class PositionEncoding(nn.Module):
@@ -138,13 +138,13 @@ class Head(nn.Module):
 
         # layers
         #   # static layers
-        self.pos_to_enc_layer = nn.Linear(2, 2,)
+        # self.pos_to_enc_layer = nn.Linear(2, 2,)
         self.enc_layer = nn.Linear(2, 1)
-        self.output_layer = nn.Linear(self.context_len, self.output_dim)
+        self.output_layer = nn.Linear(self.context_len, self.output_dim, bias=False)
         #   # dynamic layers
-        self.key = nn.Linear(2, self.context_len)
-        self.query = nn.Linear(2, self.context_len)
-        self.values = nn.Linear(2, self.context_len)
+        self.key = nn.Linear(2, self.output_dim, bias=False)
+        self.query = nn.Linear(2, self.output_dim, bias=False)
+        self.values = nn.Linear(2, self.output_dim, bias=False)
 
         # tril
         self.register_buffer('tril', torch.tril(torch.ones(self.context_len, self.context_len)))
@@ -169,7 +169,7 @@ class Head(nn.Module):
         v = self.values(x)
         out = wei @ v # [B, B] @ [B, C] -> [B, C]
         
-        out = self.output_layer(out) # [B, C] -> [B, 2]
+        # out = self.output_layer(out) # [B, C] -> [B, 2]
 
         return out
 
@@ -222,12 +222,13 @@ class MultiHeadAttention(nn.Module):
 
 
 if __name__ == '__main__':
-    CONTEXT_LEN = 4
-    BATCH_SIZE = 8
+    CONTEXT_LEN = 64
+    BATCH_SIZE = 1024
     DROPOUT = 0.1
     LEARNING_RATE = 1e-4
     NUM_HEADS = 2
-    NUM_EPOCHS = 1e2
+    HEAD_SIZE = 1
+    NUM_EPOCHS = 1e5
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -237,7 +238,7 @@ if __name__ == '__main__':
                 , context_len = CONTEXT_LEN
                 , batch_size = BATCH_SIZE
                 , dropout = DROPOUT
-                , head_output_dim=2)
+                , head_output_dim=HEAD_SIZE)
     model = model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
@@ -249,7 +250,7 @@ if __name__ == '__main__':
     epoch = 0
     for xb, yb in dataloader:
         while epoch <= NUM_EPOCHS:
-            xb, yb = get_batch2d(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train', device=DEVICE)
+            # xb, yb = get_batch2d(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train', device=DEVICE)
             optimizer.zero_grad(set_to_none=True)
             predictions = model(xb)
             predictions = predictions.to(DEVICE)
@@ -259,7 +260,7 @@ if __name__ == '__main__':
             loss.backward()
             optimizer.step()
             loss_list.append(loss.cpu().detach().numpy())
-            if epoch%10==0:
+            if epoch%(NUM_EPOCHS/10)==0:
                 print(f"iter. {epoch} - loss = {loss.item():4f}", datetime.now())
             epoch+=1
 
