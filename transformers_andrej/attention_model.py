@@ -60,7 +60,7 @@ def get_dataloader(split, batch_size, context_len, device, num_workers=4, pin_me
     
     # Criando o DataLoader com multiprocessamento e pin_memory para GPU
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                            num_workers=num_workers, pin_memory=pin_memory
+                            num_workers=num_workers, pin_memory=True if device == 'cude' else False
                             , pin_memory_device=device
                             , persistent_workers=True )
     
@@ -251,7 +251,8 @@ class TransformerBlock(nn.Module):
         
         self.ffwd = FeedForwardLayer(
                     embed_size=self.num_heads*self.head_output_dim
-                    , dropout=self.dropout_value)
+                    , dropout=self.dropout_value
+                    , inner_dim=4*self.num_heads*self.head_output_dim)
 
         # self.lay_norm1 = nn.LayerNorm(self.num_heads*self.head_output_dim)
         # self.lay_norm2 = nn.LayerNorm(self.num_heads*self.head_output_dim)
@@ -298,13 +299,13 @@ class Transformers(nn.Module):
 
 
 if __name__ == '__main__':
-    CONTEXT_LEN = 128
-    BATCH_SIZE = 2048
-    DROPOUT = 0.3
-    LEARNING_RATE = 1e-5
+    CONTEXT_LEN = 64
+    BATCH_SIZE = 512
+    DROPOUT = 0.2
+    LEARNING_RATE = 1e-4
     NUM_HEADS = 2
     HEAD_SIZE = 1
-    NUM_EPOCHS = 1e5
+    NUM_EPOCHS = 1e4
     NUM_BLOCKS = 1
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
