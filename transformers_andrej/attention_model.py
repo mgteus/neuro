@@ -20,19 +20,62 @@ from torch.utils.data import Dataset, DataLoader
 GRID_SCALER = 1
 GRID_DEFINITION = 8
 
-
-
-class RunsDataset(Dataset):
-    def __init__(self, split='train', context_len=10):
+class CustomRunsDataset():
+    def __init__(self, split='train', device='cpu',  context_len=10, file=3):
         # Carregar as colunas diretamente
-        df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15_100.gzip', columns=['x_pos', 'y_pos'])
+        # df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15_100.gzip', columns=['x_pos', 'y_pos'])
+        # df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15.gzip', columns=['x_pos', 'y_pos'])
+        path = {0:r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15_100.gzip',
+                 1:r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15.gzip',
+                 2:r'/home/mgteus/workspace/neuro/transformers_andrej/train_run.gzip'}
+        
+        df = pd.read_parquet(path[file], columns=['x_pos', 'y_pos'])
         
         # Vectorização de arredondamento e conversão para tensor
         self.feature_array = np.column_stack([
             GRID_SCALER*np.round(df['x_pos'].values, GRID_DEFINITION), 
             GRID_SCALER*np.round(df['y_pos'].values, GRID_DEFINITION)
         ])
+        self.device = device
+        # Convertendo para tensor de float32
+        self.feature_array = torch.tensor(self.feature_array, dtype=torch.float32)
         
+        # Tamanho de treinamento e teste
+        n = np.min([int(len(df) * 0.8), int(100_000)])
+        
+        # Dados para treino ou teste
+        self.data = self.feature_array[:n] if split == 'train' else self.feature_array[n:]
+        print('dataset sent to', device, 'with size ', len(self.data))
+        self.data = self.data.to(device,)
+        self.context_len = context_len
+
+    # def __len__(self):
+    #     # print(len(self.data))
+    #     return len(self.data) - self.context_len
+
+    # def __getitem__(self, idx):
+    #     # Preparando o índice de entrada e saída
+    #     x = self.data[idx: idx + self.context_len]
+    #     y = self.data[idx + 1: idx + self.context_len + 1]
+
+    #     # y = y.to(self.device)
+    #     # x = x.to(self.device)
+        
+    #     return x, y
+
+
+class RunsDataset(Dataset):
+    def __init__(self, split='train',device='cpu',  context_len=10, ):
+        # Carregar as colunas diretamente
+        # df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15_100.gzip', columns=['x_pos', 'y_pos'])
+        df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15.gzip', columns=['x_pos', 'y_pos'])
+        
+        # Vectorização de arredondamento e conversão para tensor
+        self.feature_array = np.column_stack([
+            GRID_SCALER*np.round(df['x_pos'].values, GRID_DEFINITION), 
+            GRID_SCALER*np.round(df['y_pos'].values, GRID_DEFINITION)
+        ])
+        self.device = device
         # Convertendo para tensor de float32
         self.feature_array = torch.tensor(self.feature_array, dtype=torch.float32)
         
@@ -41,6 +84,8 @@ class RunsDataset(Dataset):
         
         # Dados para treino ou teste
         self.data = self.feature_array[:n] if split == 'train' else self.feature_array[n:]
+        # print('dataset sent to', device)
+        # self.data = self.data.to(device,)
         self.context_len = context_len
 
     def __len__(self):
@@ -51,29 +96,60 @@ class RunsDataset(Dataset):
         # Preparando o índice de entrada e saída
         x = self.data[idx: idx + self.context_len]
         y = self.data[idx + 1: idx + self.context_len + 1]
+
+        # y = y.to(self.device)
+        # x = x.to(self.device)
         
         return x, y
 
 def get_dataloader(split, batch_size, context_len, device, num_workers=4, pin_memory=True):
     # Criando o dataset
-    dataset = RunsDataset(split, context_len)
-    
+    dataset = RunsDataset(split, device, context_len)
     # Criando o DataLoader com multiprocessamento e pin_memory para GPU
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                            num_workers=num_workers, pin_memory=True if device == 'cude' else False
-                            , pin_memory_device=device
-                            , persistent_workers=True )
+    dataloader = DataLoader(dataset
+                            , batch_size=batch_size
+                            , shuffle=True if split=='train' else False
+                            , num_workers=num_workers
+                            , pin_memory=True if device == 'cuda' else False
+                            # , pin_memory_device=device if device == 'cuda' else None
+                            , persistent_workers=True
+                            , drop_last=True)
     
-    # Enviar os dados para o dispositivo correto (GPU ou CPU)
-    for x_batch, y_batch in dataloader:
-        x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-        yield x_batch, y_batch
 
+        # Retorna um gerador que produz xb, yb
+    def generator():
+        for xb, yb in dataloader:
+            xb, yb = xb.to(device), yb.to(device)  # Desempacota os dados do batch
+            yield xb, yb    # Gera os dados como um par
 
+    return generator()
+    # # Enviar os dados para o dispositivo correto (GPU ou CPU)
+    # for x_batch, y_batch in dataloader:
+    #     x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+    #     yield x_batch, y_batch
 
+def custom_dataloader(dataset, batch_size, device):
+        # Verifique o tamanho total do dataset
+    dataset_size = len(dataset.data)
+    # print('dataset is on ', dataset.data.get_device())
+    context_len = dataset.context_len
+    max_iter = dataset_size // batch_size
+    print(max_iter, 'expected iters with size', batch_size)
+    iter_counter = 0
+    # Garante que índices aleatórios não ultrapassem os limites do dataset
+    max_start_idx = dataset_size - context_len - 1
+    def generator():
+        for _ in range(max_iter): 
+            # Gere n índices aleatórios no intervalo permitido
+            ix = torch.randint(len(dataset.data) - context_len -1, (batch_size,))
+            x = torch.stack([dataset.data[i:i+context_len] for i in ix])
+            y = torch.stack([dataset.data[i+1:i+context_len+1] for i in ix])
 
+            # x, y = x.to(device), y.to(device)
 
-
+            yield x, y
+        
+    return generator()
 
 def load_data(split):
     df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15_100.gzip')
@@ -93,7 +169,6 @@ def get_batch1d(context_len, batch_size, split, device):
     y = torch.stack([data[i+context_len+1] for i in ix])
     x, y = x.to(device), y.to(device)
     return x, y
-
 
 def get_batch2d(context_len, batch_size, split, device):
     data = load_data(split=split)
@@ -128,11 +203,12 @@ class PositionEncoding(nn.Module):
 
         
     def forward(self, word_embeddings):
+        # print(word_embeddings.get_device())
+        # print(self.pe[:word_embeddings.size(0), :].get_device())
         return word_embeddings + self.pe[:word_embeddings.size(0), :] 
     
     def return_positions(self, embeded_positions):
         return embeded_positions - self.pe[:embeded_positions.size(0), :]
-
 
 class Head(nn.Module):
     def __init__(self, context_len, batch_size, dropout, output_dim) -> None:
@@ -180,7 +256,6 @@ class Head(nn.Module):
         # out = self.output_layer(out) # [B, C] -> [B, 2]
 
         return out
-
 
 class MultiHeadAttention(nn.Module):
     
@@ -232,9 +307,6 @@ class FeedForwardLayer(nn.Module):
     def forward(self, x):
         return self.layer(x)
 
-
-
-
 class TransformerBlock(nn.Module):
     def __init__(self, num_heads, context_len, batch_size, dropout, head_output_dim):
         super().__init__()
@@ -266,9 +338,6 @@ class TransformerBlock(nn.Module):
 
         return x
     
-
-
-
 class Transformers(nn.Module):
     def __init__(self, num_blocks, num_heads, context_len, batch_size, dropout, head_output_dim):
         super().__init__()
@@ -299,14 +368,16 @@ class Transformers(nn.Module):
 
 
 if __name__ == '__main__':
-    CONTEXT_LEN = 64
-    BATCH_SIZE = 512
+    PATH = r'/home/mgteus/workspace/neuro/transformers_andrej/models/test_model.pt'
+    print(datetime.now())
+    CONTEXT_LEN = 128
+    BATCH_SIZE = 1024
     DROPOUT = 0.2
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 1e-5
     NUM_HEADS = 2
     HEAD_SIZE = 1
-    NUM_EPOCHS = 1e4
-    NUM_BLOCKS = 1
+    NUM_EPOCHS = 1e2
+    NUM_BLOCKS = 2
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -323,36 +394,107 @@ if __name__ == '__main__':
                 , dropout = DROPOUT
                 , head_output_dim=HEAD_SIZE)
     
-    model = model.to(DEVICE)
+        # Model class must be defined somewhere
+    model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     # Criar o DataLoader
-    dataloader = get_dataloader(split='train', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE)
+    # dataloader = get_dataloader(split='train', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE,)
+    # val_dataloader = get_dataloader(split='test', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE)
+    # dataloader = get_dataloader(split='train', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE,)
 
- 
-    loss_list = []
+    dataset_train = CustomRunsDataset(split='train', device=DEVICE, context_len=CONTEXT_LEN, file=1)
+    dataset_test = CustomRunsDataset(split='test', device=DEVICE, context_len=CONTEXT_LEN, file=2)
+
+    train_loss = []
+    batch_loss_list = []
+    test_loss = []
+    val_batch_loss_list = []
     epoch = 0
-    for xb, yb in dataloader:
-        while epoch <= NUM_EPOCHS:
+    for epoch in range(int(NUM_EPOCHS)):
+        model.train()
+        epoch_loss = 0
+        counter = 1
+        dataloader = custom_dataloader(dataset=dataset_train, batch_size=BATCH_SIZE, device=DEVICE)
+        # dataloader = get_dataloader(split='train', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE,)
+        for xb, yb in dataloader:
+            # xb = xb.to(DEVICE)
+            # yb = yb.to(DEVICE)
+            # print(xb.shape, yb.shape, counter)
             # xb, yb = get_batch2d(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train', device=DEVICE)
             optimizer.zero_grad(set_to_none=True)
             predictions = model(xb)
             predictions = predictions.to(DEVICE)
             # print(predictions.shape)
+            # print(yb.shape)
             loss = RMSELoss(predictions.view(BATCH_SIZE*CONTEXT_LEN, NUM_HEADS), yb.view(BATCH_SIZE*CONTEXT_LEN, NUM_HEADS))
             # print(loss)
             loss.backward()
             optimizer.step()
-            loss_list.append(loss.cpu().detach().numpy())
-            if epoch%(NUM_EPOCHS/10)==0:
-                print(f"iter. {epoch} - loss = {loss.item():4f}", datetime.now())
-            epoch+=1
+            loss_cpu = loss.cpu().detach().numpy()
+            epoch_loss += loss_cpu
+            # batch_loss_list.append(loss_cpu)
+            counter+=1
+        # print(counter, train_loss)
+        train_loss.append(epoch_loss / counter)
 
-    plt.plot(loss_list)
+
+
+
+        model.eval()
+        val_epoch_loss = 0
+        val_counter = 1
+        with torch.no_grad():
+            val_dataloader = custom_dataloader(dataset=dataset_test, batch_size=BATCH_SIZE, device=DEVICE)
+            for xbt, ybt in val_dataloader:
+                # xbt = xbt.to(DEVICE)
+                # ybt = ybt.to(DEVICE)
+                val_predictions = model(xbt)
+                val_loss = RMSELoss(predictions.view(BATCH_SIZE*CONTEXT_LEN, NUM_HEADS), ybt.view(BATCH_SIZE*CONTEXT_LEN, NUM_HEADS))
+                val_loss_cpu = val_loss.cpu().detach().numpy()
+                val_epoch_loss += val_loss_cpu
+                # val_batch_loss_list.append(val_loss_cpu)
+                val_counter+=1
+                
+            test_loss.append(val_epoch_loss / val_counter)
+        if epoch%(NUM_EPOCHS/10)==0:
+            print(f"iter. {epoch:02d} - loss [train] = {np.mean(train_loss):4f} - loss [test]  = {np.mean(test_loss):4f}", datetime.now())
+            # print(f"iter. {epoch:02d} - loss  = {np.mean(test_loss):4f} [test]", datetime.now())
+
+
+
+    print(f"{len(train_loss)=}")
+    print(f"{len(test_loss)=}")
+
+    
+    plt.plot(train_loss, label='train')
+    plt.plot(test_loss, label='val')
+    plt.ylabel(r'Loss ($\Delta$)')
+    plt.xlabel('Epochs')
+    plt.legend()
     plt.show()
 
 
 
+    # plt.plot(batch_loss_list, label='train')
+    # plt.plot(val_batch_loss_list, label='val')
+    # plt.ylabel(r'Loss ($\Delta$)')
+    # plt.xlabel('Batch')
+    # plt.legend()
+    # plt.show()
+
+    save_model = input('salvar modelo?')
+    if save_model == '1':
+        torch.save(model.state_dict(), PATH)
+
+        print('modelo salvo')
+
+
+    
+    # model.load_state_dict(torch.load(PATH, weights_only=True))
+    # model.eval()
+    
+    # model = model.to(DEVICE)
 
 
 
