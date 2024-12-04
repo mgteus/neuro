@@ -50,7 +50,7 @@ class RunsDataset(Dataset):
     def __getitem__(self, idx):
         # Preparando o índice de entrada e saída
         x = self.data[idx: idx + self.context_len]
-        y = self.data[idx + 1: idx + self.context_len + 1]
+        y = self.data[idx + 1: idx + 2]
         
         return x, y
 
@@ -60,8 +60,9 @@ def get_dataloader(split, batch_size, context_len, device, num_workers=4, pin_me
     
     # Criando o DataLoader com multiprocessamento e pin_memory para GPU
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, 
-                            num_workers=num_workers, pin_memory=True if device == 'cude' else False
-                            , pin_memory_device=device
+                            num_workers=num_workers
+                            # , pin_memory=True if device == 'cuda' else False
+                            # , pin_memory_device=device
                             , persistent_workers=True )
     
     # Enviar os dados para o dispositivo correto (GPU ou CPU)
@@ -76,7 +77,7 @@ def get_dataloader(split, batch_size, context_len, device, num_workers=4, pin_me
 
 
 def load_data(split):
-    df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15_100.gzip')
+    df = pd.read_parquet(r'/home/mgteus/workspace/neuro/transformers_andrej/train_runs_15.gzip')
     feature_array = []
     for x_pos,y_pos in zip(df['x_pos'], df['y_pos']):
             feature_array.append(np.array([GRID_SCALER*np.round(x_pos, GRID_DEFINITION), GRID_SCALER*np.round(y_pos, GRID_DEFINITION)], dtype='double'))
@@ -99,7 +100,7 @@ def get_batch2d(context_len, batch_size, split, device):
     data = load_data(split=split)
     ix = torch.randint(len(data) - context_len -1, (batch_size,))
     x = torch.stack([data[i:i+context_len] for i in ix])
-    y = torch.stack([data[i+1:i+context_len+1] for i in ix])
+    y = torch.stack([data[i+1:i+2] for i in ix])
 
     x, y = x.to(device), y.to(device)
     return x, y
@@ -135,23 +136,24 @@ class PositionEncoding(nn.Module):
 
 
 class Head(nn.Module):
-    def __init__(self, context_len, batch_size, dropout, output_dim) -> None:
+    def __init__(self, context_len, batch_size, dropout, head_size, output_dim) -> None:
         super().__init__()
         # parameters
         self.batch_size = batch_size
         self.context_len = context_len
         self.dropout_value = dropout
+        self.head_size = head_size
         self.output_dim = output_dim
 
         # layers
         #   # static layers
         # self.pos_to_enc_layer = nn.Linear(2, 2,)
         self.enc_layer = nn.Linear(2, 1)
-        self.output_layer = nn.Linear(self.context_len, self.output_dim, bias=False)
+        self.output_layer = nn.Linear(self.head_size, self.output_dim, bias=False)
         #   # dynamic layers
-        self.key = nn.Linear(2, self.output_dim, bias=False)
-        self.query = nn.Linear(2, self.output_dim, bias=False)
-        self.values = nn.Linear(2, self.output_dim, bias=False)
+        self.key = nn.Linear(2, self.head_size, bias=False)
+        self.query = nn.Linear(2, self.head_size, bias=False)
+        self.values = nn.Linear(2, self.head_size, bias=False)
 
         # tril
         self.register_buffer('tril', torch.tril(torch.ones(self.context_len, self.context_len)))
@@ -165,32 +167,37 @@ class Head(nn.Module):
         # x = self.enc_layer(x).squeeze(-1)        # [i, j] -> [k]
 
         B, C, _ = x.shape
+        if C < self.context_len:
+            pad_amount = self.context_len - C
+            # Padding na segunda dimensão (context_len)
+            x = nn.functional.pad(x, (0, 0, 0, pad_amount), mode="constant", value=0)
 
         k = self.key(x)
         q =  self.query(x) #self.key(x)
 
-        wei = q @ k.transpose(-2, -1) * self.output_dim**-0.5 # [B, C] @ [C, B] -> [B, B]
+        wei = q @ k.transpose(-2, -1) * self.head_size**-0.5 # [B, C] @ [C, B] -> [B, B]
         wei = wei.masked_fill(self.tril[:C, :C] == 0, float('-inf'))
         wei = nn.functional.softmax(wei, dim=-1)
-        # wei = self.dropout(wei)
+        wei = self.dropout(wei)
         # print(wei.var(),)
         v = self.values(x)
         out = wei @ v # [B, B] @ [B, C] -> [B, C]
         
-        # out = self.output_layer(out) # [B, C] -> [B, 2]
+        out = self.output_layer(out) # [B, C] -> [B, 2]
 
         return out
 
 
 class MultiHeadAttention(nn.Module):
     
-    def __init__(self, num_heads, context_len, batch_size, dropout, head_output_dim):
+    def __init__(self, num_heads, context_len, batch_size, dropout, head_output_dim, head_size):
         super().__init__()
         self.context_len = context_len
         self.batch_size = batch_size
         self.dropout_value = dropout
         self.num_heads = num_heads
         self.head_output_dim = head_output_dim
+        self.head_size = head_size
         # positional embedding
         self.pose = PositionEncoding(d_model=self.num_heads*self.head_output_dim, max_len=context_len)
         
@@ -204,6 +211,7 @@ class MultiHeadAttention(nn.Module):
             [ Head(context_len=self.context_len
                     , batch_size=self.batch_size
                     , dropout=self.dropout_value
+                    , head_size= self.head_size
                     , output_dim=self.head_output_dim)
                 for _ in range(num_heads)
                     ]
@@ -214,7 +222,7 @@ class MultiHeadAttention(nn.Module):
                 , dim=-1
                 )
         output = self.linear_both(output)
-        # output = self.dropout(output)
+        output = self.dropout(output)
         return output
 
 class FeedForwardLayer(nn.Module):
@@ -227,26 +235,53 @@ class FeedForwardLayer(nn.Module):
             nn.Linear(self.embed_size, self.inner_dim),
             nn.ReLU(),
             nn.Linear(self.inner_dim, self.embed_size),
-            # nn.Dropout(self.dropout_value),
+            nn.Dropout(self.dropout_value),
         )
     def forward(self, x):
+        # if np.random.random() > 0.96:
+        #     print('ffwd', x.shape)
         return self.layer(x)
 
-
+class ContextoToPositionLayer(nn.Module):
+    def __init__(self, context_len, dropout, inner_dim=0, final_dim=2):
+        self.context_len = context_len
+        self.inner_dim = inner_dim if inner_dim > 0 else context_len
+        self.dropout_value = dropout
+        self.final_dim = final_dim
+        super().__init__()
+        self.linear1 = nn.Linear(self.context_len, self.inner_dim)
+        self.non_linear =  nn.ReLU()
+        self.linear2 =    nn.Linear(self.inner_dim, self.final_dim)
+        self.output_layer = nn.Linear(self.context_len, self.final_dim, bias=False)
+        # self.context_to_pos = nn.Linear(self.)
+    def forward(self, x):
+        print('c to p', x.shape)
+        x = x.permute(0, 2, 1)
+        # print(x.shape)
+        x = x + self.linear1(x)
+        # print(x.shape)
+        x = self.non_linear(x)
+        print(x.shape)
+        x = x + self.linear2(x)
+        x = x.permute(0, 2, 1)
+        out = self.output_layer(x.transpose(-2, -1)).squeeze(-1)
+        return out
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, num_heads, context_len, batch_size, dropout, head_output_dim):
+    def __init__(self, num_heads, context_len, batch_size, dropout, head_output_dim, head_size):
         super().__init__()
         self.num_heads = num_heads
         self.context_len = context_len
         self.batch_size = batch_size
         self.dropout_value = dropout
         self.head_output_dim = head_output_dim
+        self.head_size = head_size
         self.sa = MultiHeadAttention(num_heads=self.num_heads,
                                      context_len=self.context_len,
                                      batch_size=self.batch_size,
                                      dropout=self.dropout_value,
+                                     head_size=self.head_size,
                                      head_output_dim=self.head_output_dim)
         
         self.ffwd = FeedForwardLayer(
@@ -270,7 +305,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformers(nn.Module):
-    def __init__(self, num_blocks, num_heads, context_len, batch_size, dropout, head_output_dim):
+    def __init__(self, num_blocks, num_heads, context_len, batch_size, dropout, head_output_dim, head_size):
         super().__init__()
         self.num_blocks = num_blocks
         self.num_heads = num_heads
@@ -278,6 +313,7 @@ class Transformers(nn.Module):
         self.batch_size = batch_size
         self.dropout_value = dropout
         self.head_output_dim = head_output_dim
+        self.head_size = head_size
         
 
         self.blocks = nn.ModuleList(
@@ -285,6 +321,7 @@ class Transformers(nn.Module):
                 , context_len = self.context_len
                 , batch_size = self.batch_size
                 , dropout = self.dropout_value
+                , head_size= self.head_size
                 , head_output_dim=self.head_output_dim)
                 for _ in range(self.num_blocks)
                     ]
@@ -292,21 +329,37 @@ class Transformers(nn.Module):
         # self.blocks.append(nn.LayerNorm(self.num_heads*self.head_output_dim))
 
         self.net = nn.Sequential(*self.blocks)
+        self.context_to_pos = ContextoToPositionLayer(
+            context_len=self.context_len
+            ,dropout=self.dropout_value
+            ,inner_dim=0
+            ,final_dim=self.num_heads*self.head_output_dim
+        )
+        
+        
+        
+        # nn.Sequential(
+        #      nn.Linear(self.context_len, 4*self.context_len)
+        #     ,nn.ReLU()
+        #     # ,nn.Linear(4*self.context_len, self.num_heads*self.head_output_dim)
+        # )
         
     def forward(self, x):
         x = x + self.net(x)
+        x = x[:,-1,:].unsqueeze(1)
         return x
 
 
 if __name__ == '__main__':
-    CONTEXT_LEN = 64
-    BATCH_SIZE = 512
-    DROPOUT = 0.2
-    LEARNING_RATE = 1e-4
+    CONTEXT_LEN = 32
+    BATCH_SIZE = 64
+    DROPOUT = 0.1
+    LEARNING_RATE = 1e-5
     NUM_HEADS = 2
-    HEAD_SIZE = 1
-    NUM_EPOCHS = 1e4
-    NUM_BLOCKS = 1
+    NUM_EPOCHS = 1e1
+    NUM_BLOCKS = 2
+    HEAD_SIZE = 64
+    HEAD_OUTPUT_DIM = 1
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -316,37 +369,58 @@ if __name__ == '__main__':
     #             , batch_size = BATCH_SIZE
     #             , dropout = DROPOUT
     #             , head_output_dim=HEAD_SIZE)
-    model = Transformers(num_blocks=NUM_BLOCKS,
-                         num_heads = NUM_HEADS
-                , context_len = CONTEXT_LEN
-                , batch_size = BATCH_SIZE
-                , dropout = DROPOUT
-                , head_output_dim=HEAD_SIZE)
+    # model = MultiHeadAttention(
+    #     num_heads=NUM_HEADS,
+    #     context_len=CONTEXT_LEN,
+    #     batch_size=BATCH_SIZE,
+    #     dropout=DROPOUT,
+    #     head_output_dim=HEAD_OUTPUT_DIM,
+    #     head_size=HEAD_SIZE,
+    # )
+    # model = TransformerBlock(
+    #     num_heads=NUM_HEADS,
+    #     context_len=CONTEXT_LEN,
+    #     batch_size=BATCH_SIZE,
+    #     dropout=DROPOUT,
+    #     head_output_dim=HEAD_OUTPUT_DIM,
+    #     head_size=HEAD_SIZE
+    # )
+    model = Transformers(
+        num_blocks=NUM_BLOCKS,
+        num_heads=NUM_HEADS,
+        context_len=CONTEXT_LEN,
+        batch_size=BATCH_SIZE,
+        dropout=DROPOUT,
+        head_output_dim=HEAD_OUTPUT_DIM,
+        head_size=HEAD_SIZE
+    )
     
     model = model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
-    # Criar o DataLoader
-    dataloader = get_dataloader(split='train', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE)
+
 
  
     loss_list = []
     epoch = 0
-    for xb, yb in dataloader:
-        while epoch <= NUM_EPOCHS:
-            # xb, yb = get_batch2d(context_len=CONTEXT_LEN, batch_size=BATCH_SIZE, split='train', device=DEVICE)
+
+    for epoch in range(int(NUM_EPOCHS)):
+        # Criar o DataLoader
+        dataloader = get_dataloader(split='train', batch_size=BATCH_SIZE, context_len=CONTEXT_LEN, device=DEVICE)
+        print('dataset carregado', datetime.now())
+        for xb, yb in dataloader:
             optimizer.zero_grad(set_to_none=True)
             predictions = model(xb)
             predictions = predictions.to(DEVICE)
             # print(predictions.shape)
-            loss = RMSELoss(predictions.view(BATCH_SIZE*CONTEXT_LEN, NUM_HEADS), yb.view(BATCH_SIZE*CONTEXT_LEN, NUM_HEADS))
+            loss = RMSELoss(predictions, yb)
             # print(loss)
             loss.backward()
             optimizer.step()
             loss_list.append(loss.cpu().detach().numpy())
-            if epoch%(NUM_EPOCHS/10)==0:
-                print(f"iter. {epoch} - loss = {loss.item():4f}", datetime.now())
-            epoch+=1
+        if epoch%(NUM_EPOCHS/10)==0:
+            print(f"iter. {epoch} - loss = {loss.item():4f}", datetime.now())
+            # epoch+=1
 
     plt.plot(loss_list)
     plt.show()
